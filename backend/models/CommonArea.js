@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const roomSchema = new mongoose.Schema({
+const commonAreaSchema = new mongoose.Schema({
     hostel: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Hostel',
@@ -10,29 +10,24 @@ const roomSchema = new mongoose.Schema({
         type: Number,
         required: true,
     },
-    roomNumber: {
+    type: {
         type: String,
+        enum: ['Washroom', 'Study Room', 'Common Room'],
         required: true,
     },
-    isGeneral: {
-        type: Boolean,
-        default: true
-    },
-    allocation: {
-        faculty: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: 'Faculty',
-        },
-        year: {
-            type: String,
-        },
-        capacity: {
-            type: Number,
-            enum: [2, 4, 6, 8],
-            default: 4,
-        },
-    },
     assets: {
+        toilets: {
+            total: { type: Number, default: 0 },
+            working: { type: Number, default: 0 },
+        },
+        sinks: {
+            total: { type: Number, default: 0 },
+            working: { type: Number, default: 0 },
+        },
+        showers: {
+            total: { type: Number, default: 0 },
+            working: { type: Number, default: 0 },
+        },
         fans: {
             total: { type: Number, default: 0 },
             working: { type: Number, default: 0 },
@@ -44,8 +39,8 @@ const roomSchema = new mongoose.Schema({
         plugs: {
             total: { type: Number, default: 0 },
             working: { type: Number, default: 0 },
-        },
+        }
     },
 }, { timestamps: true });
 
-module.exports = mongoose.model('Room', roomSchema);
+module.exports = mongoose.model('CommonArea', commonAreaSchema);

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Hostel = require('../models/Hostel');
 const Faculty = require('../models/Faculty');
+const adminController = require('../controllers/adminController');
 
 // @route   POST /api/admin/faculty
 // @desc    Add a New Faculty
@@ -49,5 +50,21 @@ router.post('/hostel', async (req, res) => {
         res.status(500).json({ message: 'Server error creating hostel' });
     }
 });
+
+// @route   POST /api/admin/hostel/:hostelId/design
+// @desc    Design a Hostel (Auto-generate Rooms)
+router.post('/hostel/:hostelId/design', adminController.designHostel);
+
+// @route   PUT /api/admin/room/:roomId/configure
+// @desc    Configure Room Allocation Rules
+router.put('/room/:roomId/configure', adminController.configureRoom);
+
+// @route   PUT /api/admin/room/:roomId/assets
+// @desc    Update Room Assets
+router.put('/room/:roomId/assets', adminController.updateRoomAssets);
+
+// @route   POST /api/admin/room/:roomId/allocate
+// @desc    Allocate Student to Room
+router.post('/room/:roomId/allocate', adminController.allocateStudent);
 
 module.exports = router;
