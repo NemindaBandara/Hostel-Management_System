@@ -34,16 +34,16 @@ const roomSchema = new mongoose.Schema({
     },
     assets: {
         fans: {
-            total: { type: Number, default: 0 },
             working: { type: Number, default: 0 },
+            notWorking: { type: Number, default: 0 },
         },
         lights: {
-            total: { type: Number, default: 0 },
             working: { type: Number, default: 0 },
+            notWorking: { type: Number, default: 0 },
         },
         plugs: {
-            total: { type: Number, default: 0 },
             working: { type: Number, default: 0 },
+            notWorking: { type: Number, default: 0 },
         },
     },
 }, { timestamps: true });
