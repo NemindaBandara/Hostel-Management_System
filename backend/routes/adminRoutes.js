@@ -67,4 +67,12 @@ router.put('/room/:roomId/assets', adminController.updateRoomAssets);
 // @desc    Allocate Student to Room
 router.post('/room/:roomId/allocate', adminController.allocateStudent);
 
+// @route   PUT /api/admin/common-area/:commonAreaId/assets
+// @desc    Update Common Area Assets
+router.put('/common-area/:commonAreaId/assets', adminController.updateCommonAreaAssets);
+
+// @route   GET /api/admin/hostel/:hostelId/layout
+// @desc    Get Hostel Layout (Rooms and Common Areas grouped by floor)
+router.get('/hostel/:hostelId/layout', adminController.getHostelLayout);
+
 module.exports = router;

@@ -2,13 +2,14 @@ const Hostel = require('../models/Hostel');
 const Room = require('../models/Room');
 const Faculty = require('../models/Faculty');
 const Student = require('../models/Student');
+const CommonArea = require('../models/CommonArea');
 
 // @route   POST /api/admin/hostel/:hostelId/design
-// @desc    Design a Hostel (Auto-generate Rooms)
+// @desc    Design a Hostel (Auto-generate Rooms and Common Areas)
 exports.designHostel = async (req, res) => {
     try {
         const { hostelId } = req.params;
-        const { floorConfigs } = req.body; // e.g., [8, 12, 12]
+        const { floorConfigs, commonAreaConfig } = req.body; // commonAreaConfig e.g. { "1": ["Washroom", "Study Room"], "2": ["Washroom"] }
 
         if (!floorConfigs || !Array.isArray(floorConfigs) || floorConfigs.length === 0) {
             return res.status(400).json({ message: 'Please provide a valid floorConfigs array' });
@@ -34,11 +35,13 @@ exports.designHostel = async (req, res) => {
         }
 
         const roomsToCreate = [];
+        const commonAreasToCreate = [];
 
         for (let i = 0; i < floors; i++) {
             const floorIndex = i + 1;
             const roomsOnThisFloor = floorConfigs[i];
 
+            // 1. Generate Rooms
             for (let roomIndex = 1; roomIndex <= roomsOnThisFloor; roomIndex++) {
                 // Generate a logical room number, e.g., Floor 1 Room 1 -> 101, Floor 2 Room 12 -> 212
                 const roomIndexFormatted = roomIndex < 10 ? `0${roomIndex}` : `${roomIndex}`;
@@ -54,13 +57,29 @@ exports.designHostel = async (req, res) => {
                     }
                 });
             }
+
+            // 2. Generate Common Areas
+            // If commonAreaConfig provided for this floor, use it, else default to ['Washroom']
+            const areasForFloor = (commonAreaConfig && commonAreaConfig[floorIndex])
+                ? commonAreaConfig[floorIndex]
+                : ['Washroom'];
+
+            for (const areaType of areasForFloor) {
+                commonAreasToCreate.push({
+                    hostel: hostelId,
+                    floor: floorIndex,
+                    type: areaType
+                });
+            }
         }
 
         await Room.insertMany(roomsToCreate);
+        await CommonArea.insertMany(commonAreasToCreate);
 
         res.status(201).json({
-            message: `Successfully generated ${roomsToCreate.length} rooms across ${floors} floors for ${hostel.officialName}.`,
-            count: roomsToCreate.length
+            message: `Successfully generated ${roomsToCreate.length} rooms and ${commonAreasToCreate.length} common areas across ${floors} floors for ${hostel.officialName}.`,
+            roomCount: roomsToCreate.length,
+            commonAreaCount: commonAreasToCreate.length
         });
     } catch (error) {
         console.error('Error designing hostel:', error);
@@ -213,5 +232,77 @@ exports.allocateStudent = async (req, res) => {
     } catch (error) {
         console.error('Error allocating student:', error);
         res.status(500).json({ message: 'Server error allocating student' });
+    }
+};
+
+// @route   PUT /api/admin/common-area/:commonAreaId/assets
+// @desc    Update Common Area Assets
+exports.updateCommonAreaAssets = async (req, res) => {
+    try {
+        const { commonAreaId } = req.params;
+        const assetsUpdates = req.body;
+
+        const commonArea = await CommonArea.findById(commonAreaId);
+        if (!commonArea) {
+            return res.status(404).json({ message: 'Common area not found' });
+        }
+
+        // Merge updates selectively
+        if (assetsUpdates.toilets) commonArea.assets.toilets = { ...commonArea.assets.toilets, ...assetsUpdates.toilets };
+        if (assetsUpdates.sinks) commonArea.assets.sinks = { ...commonArea.assets.sinks, ...assetsUpdates.sinks };
+        if (assetsUpdates.showers) commonArea.assets.showers = { ...commonArea.assets.showers, ...assetsUpdates.showers };
+        if (assetsUpdates.fans) commonArea.assets.fans = { ...commonArea.assets.fans, ...assetsUpdates.fans };
+        if (assetsUpdates.lights) commonArea.assets.lights = { ...commonArea.assets.lights, ...assetsUpdates.lights };
+        if (assetsUpdates.plugs) commonArea.assets.plugs = { ...commonArea.assets.plugs, ...assetsUpdates.plugs };
+
+        await commonArea.save();
+
+        res.status(200).json({ message: 'Common area assets updated successfully', assets: commonArea.assets });
+    } catch (error) {
+        console.error('Error updating common area assets:', error);
+        res.status(500).json({ message: 'Server error updating common area assets' });
+    }
+};
+
+// @route   GET /api/admin/hostel/:hostelId/layout
+// @desc    Get complete structure of rooms and common areas grouped by floor
+exports.getHostelLayout = async (req, res) => {
+    try {
+        const { hostelId } = req.params;
+
+        // Fetch all rooms and common areas for this hostel
+        const [rooms, commonAreas] = await Promise.all([
+            Room.find({ hostel: hostelId }).populate('allocation.faculty'),
+            CommonArea.find({ hostel: hostelId })
+        ]);
+
+        // Group by floor
+        const layout = {};
+
+        // Helper to ensure floor array exists
+        const ensureFloor = (floor) => {
+            if (!layout[floor]) {
+                layout[floor] = {
+                    rooms: [],
+                    commonAreas: []
+                };
+            }
+        };
+
+        rooms.forEach((room) => {
+            ensureFloor(room.floor);
+            layout[room.floor].rooms.push(room);
+        });
+
+        commonAreas.forEach((area) => {
+            ensureFloor(area.floor);
+            layout[area.floor].commonAreas.push(area);
+        });
+
+        res.status(200).json({ layout });
+
+    } catch (error) {
+        console.error('Error fetching hostel layout:', error);
+        res.status(500).json({ message: 'Server error fetching hostel layout' });
     }
 };
