@@ -19,7 +19,7 @@ mongoose
   .then(() => console.log("✅ MongoDB Connected Successfully"))
   .catch((err) => console.log("❌ MongoDB Connection Error:", err));
 
-// Basic Route for Testing
+// Basic Route for Testings
 app.get("/", (req, res) => {
   res.send("Hostel Management System API is running...");
 });
