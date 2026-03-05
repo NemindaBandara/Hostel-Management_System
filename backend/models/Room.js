@@ -10,20 +10,26 @@ const roomSchema = new mongoose.Schema({
         type: Number,
         required: true,
     },
+    roomNumber: {
+        type: String,
+        required: true,
+    },
+    isGeneral: {
+        type: Boolean,
+        default: true
+    },
     allocation: {
         faculty: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Faculty',
-            required: true,
         },
         year: {
             type: String,
-            required: true,
         },
         capacity: {
             type: Number,
             enum: [2, 4, 6, 8],
-            required: true,
+            default: 4,
         },
     },
     assets: {
@@ -39,18 +45,18 @@ const roomSchema = new mongoose.Schema({
             total: { type: Number, default: 0 },
             working: { type: Number, default: 0 },
         },
-        showers: {
-            type: Number,
-            default: 0,
-        },
-        sinks: {
-            type: Number,
-            default: 0,
-        },
-        toilets: {
-            type: Number,
-            default: 0,
-        },
+        // showers: {
+        //     type: Number,
+        //     default: 0,
+        // },
+        // sinks: {
+        //     type: Number,
+        //     default: 0,
+        // },
+        // toilets: {
+        //     type: Number,
+        //     default: 0,
+        // },
     },
 }, { timestamps: true });
 
