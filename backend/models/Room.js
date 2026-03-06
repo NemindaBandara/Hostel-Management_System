@@ -33,6 +33,26 @@ const roomSchema = new mongoose.Schema({
         },
     },
     assets: {
+        beds: {
+            working: { type: Number, default: 0 },
+            notWorking: { type: Number, default: 0 },
+        },
+        lockers: {
+            working: { type: Number, default: 0 },
+            notWorking: { type: Number, default: 0 },
+        },
+        tables: {
+            working: { type: Number, default: 0 },
+            notWorking: { type: Number, default: 0 },
+        },
+        chairs: {
+            working: { type: Number, default: 0 },
+            notWorking: { type: Number, default: 0 },
+        },
+        racks: {
+            working: { type: Number, default: 0 },
+            notWorking: { type: Number, default: 0 },
+        },
         fans: {
             working: { type: Number, default: 0 },
             notWorking: { type: Number, default: 0 },

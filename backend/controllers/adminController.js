@@ -1,8 +1,81 @@
+const mongoose = require('mongoose');
 const Hostel = require('../models/Hostel');
 const Room = require('../models/Room');
 const Faculty = require('../models/Faculty');
 const Student = require('../models/Student');
 const CommonArea = require('../models/CommonArea');
+
+// @route   PUT /api/admin/hostel/:hostelId
+// @desc    Edit existing Hostel details
+exports.updateHostel = async (req, res) => {
+    try {
+        const { hostelId } = req.params;
+        const { officialName, alias, gender } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(hostelId)) {
+            return res.status(400).json({ message: 'Invalid Hostel ID format' });
+        }
+
+        const hostel = await Hostel.findById(hostelId);
+        if (!hostel) return res.status(404).json({ message: 'Hostel not found' });
+
+        if (officialName) hostel.officialName = officialName;
+        if (alias) hostel.alias = alias;
+        if (gender) hostel.gender = gender;
+
+        await hostel.save();
+        res.status(200).json(hostel);
+    } catch (error) {
+        console.error('Error updating hostel:', error);
+        res.status(500).json({ message: 'Server error updating hostel' });
+    }
+};
+
+// @route   DELETE /api/admin/hostel/:hostelId
+// @desc    Delete Hostel and cascade all its Layouts
+exports.deleteHostel = async (req, res) => {
+    try {
+        const { hostelId } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(hostelId)) {
+            return res.status(400).json({ message: 'Invalid Hostel ID format' });
+        }
+
+        const hostel = await Hostel.findById(hostelId);
+        if (!hostel) return res.status(404).json({ message: 'Hostel not found' });
+
+        // Cascade delete rooms and common areas
+        await Room.deleteMany({ hostel: hostelId });
+        await CommonArea.deleteMany({ hostel: hostelId });
+        await hostel.deleteOne();
+
+        res.status(200).json({ message: 'Hostel and its physical mapped layouts completely deleted' });
+    } catch (error) {
+        console.error('Error deleting hostel:', error);
+        res.status(500).json({ message: 'Server error deleting hostel' });
+    }
+};
+
+// @route   DELETE /api/admin/hostel/:hostelId/design
+// @desc    Reset and delete a Hostel's floorplan/layout
+exports.deleteHostelDesign = async (req, res) => {
+    try {
+        const { hostelId } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(hostelId)) {
+            return res.status(400).json({ message: 'Invalid Hostel ID format' });
+        }
+
+        // Keep the building, just burn the layout
+        await Room.deleteMany({ hostel: hostelId });
+        await CommonArea.deleteMany({ hostel: hostelId });
+
+        res.status(200).json({ message: 'Hostel layout successfully reset' });
+    } catch (error) {
+        console.error('Error resetting layout:', error);
+        res.status(500).json({ message: 'Server error resetting layout' });
+    }
+};
 
 // @route   POST /api/admin/hostel/:hostelId/design
 // @desc    Design a Hostel (Auto-generate Rooms and Common Areas)
@@ -84,6 +157,84 @@ exports.designHostel = async (req, res) => {
     } catch (error) {
         console.error('Error designing hostel:', error);
         res.status(500).json({ message: 'Server error designing hostel' });
+    }
+};
+
+// @route   PUT /api/admin/hostel/:hostelId/floor/:floor/bulk-assets
+// @desc    Mass-update all rooms on a specific floor with a copied asset template
+exports.bulkUpdateFloorAssets = async (req, res) => {
+    try {
+        const { hostelId, floor } = req.params;
+        const { assets } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(hostelId)) {
+            return res.status(400).json({ message: 'Invalid Hostel ID format' });
+        }
+
+        if (!assets || typeof assets !== 'object') {
+            return res.status(400).json({ message: 'Valid assets template object is required' });
+        }
+
+        // Find all rooms on this specific floor for this hostel
+        // Update them all with the new asset template
+        const result = await Room.updateMany(
+            { hostel: hostelId, floor: Number(floor) },
+            { $set: { assets: assets } }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({ message: 'No rooms found on this floor' });
+        }
+
+        res.status(200).json({
+            message: `Successfully updated ${result.modifiedCount} rooms on Floor ${floor}`,
+            modifiedCount: result.modifiedCount
+        });
+    } catch (error) {
+        console.error('Error bulk updating floor assets:', error);
+        res.status(500).json({ message: 'Server error during bulk asset update' });
+    }
+};
+
+// @route   PUT /api/admin/room/:roomId
+// @desc    Update Room Allocation and Assets
+exports.updateRoom = async (req, res) => {
+    try {
+        const { roomId } = req.params;
+        const { faculty, year, assets } = req.body;
+
+        const room = await Room.findById(roomId);
+        if (!room) {
+            return res.status(404).json({ message: 'Room not found' });
+        }
+
+        // Update allocation fields
+        if (faculty) {
+            const facultyObj = await Faculty.findById(faculty);
+            if (!facultyObj) {
+                return res.status(404).json({ message: 'Faculty not found' });
+            }
+            room.allocation.faculty = faculty;
+            room.isGeneral = false;
+        } else if (faculty === null || faculty === '') {
+            room.allocation.faculty = undefined;
+            room.isGeneral = true;
+        }
+
+        if (year !== undefined) room.allocation.year = String(year);
+
+        // Update assets
+        if (assets && typeof assets === 'object') {
+            room.assets = { ...room.assets, ...assets };
+        }
+
+        await room.save();
+        await room.populate('allocation.faculty');
+
+        res.status(200).json({ message: 'Room updated successfully', room });
+    } catch (error) {
+        console.error('Error updating room:', error);
+        res.status(500).json({ message: 'Server error updating room' });
     }
 };
 
@@ -264,11 +415,37 @@ exports.updateCommonAreaAssets = async (req, res) => {
     }
 };
 
+// @route   GET /api/admin/hostels
+// @desc    Get all Hostels
+exports.getAllHostels = async (req, res) => {
+    try {
+        const hostels = await Hostel.find().lean();
+
+        // Add a boolean indicating if a floorplan has been generated
+        const hostelsWithDesignStatus = await Promise.all(hostels.map(async (hostel) => {
+            const hasRooms = await Room.exists({ hostel: hostel._id });
+            return {
+                ...hostel,
+                isDesigned: !!hasRooms
+            };
+        }));
+
+        res.status(200).json(hostelsWithDesignStatus);
+    } catch (error) {
+        console.error('Error fetching hostels:', error);
+        res.status(500).json({ message: 'Server error fetching hostels' });
+    }
+};
+
 // @route   GET /api/admin/hostel/:hostelId/layout
 // @desc    Get complete structure of rooms and common areas grouped by floor
 exports.getHostelLayout = async (req, res) => {
     try {
         const { hostelId } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(hostelId)) {
+            return res.status(400).json({ message: 'Invalid Hostel ID format' });
+        }
 
         // Fetch all rooms and common areas for this hostel
         const [rooms, commonAreas] = await Promise.all([
@@ -299,10 +476,245 @@ exports.getHostelLayout = async (req, res) => {
             layout[area.floor].commonAreas.push(area);
         });
 
-        res.status(200).json({ layout });
+        // Convert the layout object dictionary into the expected structured array format for the frontend
+        const formattedLayout = Object.keys(layout).map((floorNum) => ({
+            floor: parseInt(floorNum, 10),
+            rooms: layout[floorNum].rooms,
+            commonAreas: layout[floorNum].commonAreas
+        })).sort((a, b) => a.floor - b.floor);
+
+        res.status(200).json({ floors: formattedLayout });
 
     } catch (error) {
         console.error('Error fetching hostel layout:', error);
         res.status(500).json({ message: 'Server error fetching hostel layout' });
+    }
+};
+
+// @route   PUT /api/admin/hostel/:hostelId/floor/:floor/bulk-assets
+// @desc    Mass-update all rooms on a specific floor with a shared asset template configuration
+exports.bulkUpdateFloorAssets = async (req, res) => {
+    try {
+        const { hostelId, floor } = req.params;
+        const { assets } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(hostelId)) {
+            return res.status(400).json({ message: 'Invalid Hostel ID format' });
+        }
+
+        if (!assets || typeof assets !== 'object') {
+            return res.status(400).json({ message: 'Valid assets configuration object is required' });
+        }
+
+        // Apply to all rooms with matching hostel and floor exactly
+        const updateResult = await Room.updateMany(
+            { hostel: hostelId, floor: Number(floor) },
+            { $set: { assets: assets } }
+        );
+
+        res.status(200).json({
+            message: `Successfully pasted template to ${updateResult.modifiedCount} rooms on Floor ${floor}`,
+            modifiedCount: updateResult.modifiedCount
+        });
+
+    } catch (error) {
+        console.error('Error executing bulk floor asset update:', error);
+        res.status(500).json({ message: 'Server error processing bulk update' });
+    }
+};
+
+// @route   GET /api/admin/faculties
+// @desc    Get all Faculties
+exports.getAllFaculties = async (req, res) => {
+    try {
+        const faculties = await Faculty.find();
+        res.status(200).json(faculties);
+    } catch (error) {
+        console.error('Error fetching faculties:', error);
+        res.status(500).json({ message: 'Server error fetching faculties' });
+    }
+};
+
+// @route   PUT /api/admin/faculty/:facultyId
+// @desc    Edit existing Faculty details
+exports.updateFaculty = async (req, res) => {
+    try {
+        const { facultyId } = req.params;
+        const { name, color, facultyCode } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(facultyId)) {
+            return res.status(400).json({ message: 'Invalid Faculty ID format' });
+        }
+
+        const faculty = await Faculty.findById(facultyId);
+        if (!faculty) return res.status(404).json({ message: 'Faculty not found' });
+
+        if (name) faculty.name = name;
+        if (color) faculty.color = color;
+        if (facultyCode) {
+            const existingFaculty = await Faculty.findOne({ facultyCode, _id: { $ne: facultyId } });
+            if (existingFaculty) {
+                return res.status(400).json({ message: 'Another faculty with this code already exists' });
+            }
+            faculty.facultyCode = facultyCode;
+        }
+
+        await faculty.save();
+        res.status(200).json(faculty);
+    } catch (error) {
+        console.error('Error updating faculty:', error);
+        res.status(500).json({ message: 'Server error updating faculty' });
+    }
+};
+
+// @route   DELETE /api/admin/faculty/:facultyId
+// @desc    Delete Faculty
+exports.deleteFaculty = async (req, res) => {
+    try {
+        const { facultyId } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(facultyId)) {
+            return res.status(400).json({ message: 'Invalid Faculty ID format' });
+        }
+
+        const faculty = await Faculty.findById(facultyId);
+        if (!faculty) return res.status(404).json({ message: 'Faculty not found' });
+
+        await Faculty.findByIdAndDelete(facultyId);
+
+        res.status(200).json({ message: 'Faculty deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting faculty:', error);
+        res.status(500).json({ message: 'Server error deleting faculty' });
+    }
+};
+
+// @route   POST /api/admin/students/bulk
+// @desc    Bulk upload students via CSV
+exports.bulkUploadStudents = async (req, res) => {
+    try {
+        const { students } = req.body;
+
+        if (!students || !Array.isArray(students) || students.length === 0) {
+            return res.status(400).json({ message: 'Invalid or empty students data provided' });
+        }
+
+        // Pre-fetch faculties to map string IDs efficiently
+        const dbFaculties = await Faculty.find();
+        const facultyLookup = {};
+        dbFaculties.forEach(f => {
+            facultyLookup[f.name.toLowerCase()] = f._id;
+            if (f.facultyCode) facultyLookup[f.facultyCode.toLowerCase()] = f._id;
+        });
+
+        // Upsert logic: if indexNumber exists, update existing record, else create new
+        const operations = students.map((student) => {
+            // Map the parsed name, handle combined old 'name' requirement
+            const cleanStudent = { ...student };
+            cleanStudent.name = `${cleanStudent.firstName || ''} ${cleanStudent.lastName || ''}`.trim();
+
+            // Map the faculty string to ObjectId if match exists, otherwise drop it to prevent BSONError
+            let facultyId = undefined;
+            if (cleanStudent.faculty) {
+                const facStr = cleanStudent.faculty.toString().toLowerCase();
+                facultyId = facultyLookup[facStr];
+            }
+
+            if (facultyId) {
+                cleanStudent.faculty = facultyId;
+            } else {
+                delete cleanStudent.faculty;
+            }
+
+            return {
+                updateOne: {
+                    filter: { indexNumber: cleanStudent.indexNumber },
+                    update: { $set: cleanStudent },
+                    upsert: true
+                }
+            };
+        });
+
+        const result = await Student.bulkWrite(operations);
+
+        res.status(200).json({
+            message: 'Bulk upload completed successfully',
+            upsertedCount: result.upsertedCount,
+            modifiedCount: result.modifiedCount
+        });
+    } catch (error) {
+        console.error('Error in bulk upload:', error);
+        res.status(500).json({ message: 'Server error processing bulk upload' });
+    }
+};
+
+// @route   POST /api/admin/student
+// @desc    Add a single student
+exports.addStudent = async (req, res) => {
+    try {
+        const { firstName, lastName, indexNumber, email, faculty, year } = req.body;
+
+        if (!indexNumber) {
+            return res.status(400).json({ message: 'Index Number is required' });
+        }
+
+        // Check for duplicates
+        const existingStudent = await Student.findOne({ indexNumber });
+        if (existingStudent) {
+            return res.status(400).json({ message: `Student with index ${indexNumber} already exists` });
+        }
+
+        const studentPayload = {
+            firstName,
+            lastName,
+            name: `${firstName || ''} ${lastName || ''}`.trim(),
+            indexNumber,
+            email,
+            year
+        };
+
+        // Try mapping faculty if provided
+        if (faculty) {
+            const facStr = faculty.toLowerCase();
+            const dbFac = await Faculty.findOne({ $or: [{ name: new RegExp('^' + facStr + '$', 'i') }, { facultyCode: new RegExp('^' + facStr + '$', 'i') }] });
+            if (dbFac) {
+                studentPayload.faculty = dbFac._id;
+            }
+        }
+
+        const student = new Student(studentPayload);
+
+        await student.save();
+        res.status(201).json(student);
+
+    } catch (error) {
+        console.error('Error adding single student:', error);
+        res.status(500).json({ message: 'Server error adding student' });
+    }
+};
+
+// @route   GET /api/admin/students/count
+// @desc    Get aggregate student counts
+exports.getStudentCount = async (req, res) => {
+    try {
+        const { facultyId, year } = req.query;
+
+        const filter = {};
+
+        if (facultyId && mongoose.Types.ObjectId.isValid(facultyId)) {
+            filter.faculty = facultyId;
+        }
+
+        if (year) {
+            filter.year = new RegExp(year, 'i');
+        }
+
+        const count = await Student.countDocuments(filter);
+
+        res.status(200).json({ count });
+
+    } catch (error) {
+        console.error('Error fetching student count:', error);
+        res.status(500).json({ message: 'Server error fetching student count' });
     }
 };
