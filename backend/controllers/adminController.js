@@ -210,11 +210,17 @@ exports.updateRoom = async (req, res) => {
 
         // Update allocation fields
         if (faculty) {
-            const facultyObj = await Faculty.findById(faculty);
+            let facultyObj;
+            if (mongoose.Types.ObjectId.isValid(faculty)) {
+                facultyObj = await Faculty.findById(faculty);
+            } else {
+                facultyObj = await Faculty.findOne({ facultyCode: faculty });
+            }
+
             if (!facultyObj) {
                 return res.status(404).json({ message: 'Faculty not found' });
             }
-            room.allocation.faculty = faculty;
+            room.allocation.faculty = facultyObj._id;
             room.isGeneral = false;
         } else if (faculty === null || faculty === '') {
             room.allocation.faculty = undefined;
@@ -447,11 +453,22 @@ exports.getHostelLayout = async (req, res) => {
             return res.status(400).json({ message: 'Invalid Hostel ID format' });
         }
 
-        // Fetch all rooms and common areas for this hostel
-        const [rooms, commonAreas] = await Promise.all([
+        // Fetch all rooms, common areas, and students for this hostel
+        const [rooms, commonAreas, students] = await Promise.all([
             Room.find({ hostel: hostelId }).populate('allocation.faculty'),
-            CommonArea.find({ hostel: hostelId })
+            CommonArea.find({ hostel: hostelId }),
+            Student.find({ assignedRoom: { $in: (await Room.find({ hostel: hostelId }).select('_id')).map(r => r._id) } })
         ]);
+
+        // Map students to their rooms
+        const studentMap = {};
+        students.forEach(student => {
+            if (student.assignedRoom) {
+                const rid = student.assignedRoom.toString();
+                if (!studentMap[rid]) studentMap[rid] = [];
+                studentMap[rid].push(student);
+            }
+        });
 
         // Group by floor
         const layout = {};
@@ -468,7 +485,10 @@ exports.getHostelLayout = async (req, res) => {
 
         rooms.forEach((room) => {
             ensureFloor(room.floor);
-            layout[room.floor].rooms.push(room);
+            // Convert to object and inject students
+            const roomObj = room.toObject();
+            roomObj.students = studentMap[room._id.toString()] || [];
+            layout[room.floor].rooms.push(roomObj);
         });
 
         commonAreas.forEach((area) => {
@@ -483,7 +503,10 @@ exports.getHostelLayout = async (req, res) => {
             commonAreas: layout[floorNum].commonAreas
         })).sort((a, b) => a.floor - b.floor);
 
-        res.status(200).json({ floors: formattedLayout });
+        res.status(200).json({
+            layout: layout,
+            floors: formattedLayout
+        });
 
     } catch (error) {
         console.error('Error fetching hostel layout:', error);
@@ -716,5 +739,62 @@ exports.getStudentCount = async (req, res) => {
     } catch (error) {
         console.error('Error fetching student count:', error);
         res.status(500).json({ message: 'Server error fetching student count' });
+    }
+};
+
+// @route   GET /api/admin/students/unassigned
+// @desc    Get students not assigned to any room, filtered by faculty, year, and search
+exports.getUnassignedStudents = async (req, res) => {
+    try {
+        const { faculty, year, search } = req.query;
+
+        const filter = { assignedRoom: null };
+
+        if (faculty && mongoose.Types.ObjectId.isValid(faculty)) {
+            filter.faculty = faculty;
+        }
+
+        if (year) {
+            filter.year = year;
+        }
+
+        if (search) {
+            filter.$or = [
+                { name: new RegExp(search, 'i') },
+                { firstName: new RegExp(search, 'i') },
+                { lastName: new RegExp(search, 'i') },
+                { indexNumber: new RegExp(search, 'i') }
+            ];
+        }
+
+        const students = await Student.find(filter).limit(20).populate('faculty');
+        res.status(200).json(students);
+    } catch (error) {
+        console.error('Error fetching unassigned students:', error);
+        res.status(500).json({ message: 'Server error fetching students' });
+    }
+};
+
+// @route   PUT /api/admin/student/:studentId/unassign
+// @desc    Unassign a student from their current room
+exports.unassignStudent = async (req, res) => {
+    try {
+        const { studentId } = req.params;
+
+        const student = await Student.findById(studentId);
+        if (!student) {
+            return res.status(404).json({ message: 'Student not found' });
+        }
+
+        student.assignedRoom = null;
+        await student.save();
+
+        res.status(200).json({
+            message: 'Student successfully unassigned',
+            student
+        });
+    } catch (error) {
+        console.error('Error unassigning student:', error);
+        res.status(500).json({ message: 'Server error unassigning student' });
     }
 };

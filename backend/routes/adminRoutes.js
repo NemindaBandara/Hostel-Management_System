@@ -122,5 +122,7 @@ router.post('/student', adminController.addStudent);
 // @route   GET /api/admin/students/count
 // @desc    Get aggregate student counts (supports filtering by year/faculty)
 router.get('/students/count', adminController.getStudentCount);
+router.get('/students/unassigned', adminController.getUnassignedStudents);
+router.put('/student/:studentId/unassign', adminController.unassignStudent);
 
 module.exports = router;
