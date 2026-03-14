@@ -292,6 +292,57 @@ exports.configureRoom = async (req, res) => {
     }
 };
 
+// @route   PUT /api/admin/rooms/bulk-update
+// @desc    Bulk update multiple rooms configuration
+exports.bulkUpdateRooms = async (req, res) => {
+    try {
+        const { roomIds, facultyId, year, capacity, isGeneral } = req.body;
+
+        if (!roomIds || !Array.isArray(roomIds) || roomIds.length === 0) {
+            return res.status(400).json({ message: 'No room IDs provided' });
+        }
+
+        const updateData = {};
+
+        // If isGeneral is explicitly true, or facultyId is null, make it a general room
+        if (isGeneral === true || facultyId === null) {
+            updateData['isGeneral'] = true;
+            updateData['allocation.faculty'] = undefined;
+        } else if (facultyId) {
+            if (!mongoose.Types.ObjectId.isValid(facultyId)) {
+                return res.status(400).json({ message: 'Invalid Faculty ID format' });
+            }
+            updateData['isGeneral'] = false;
+            updateData['allocation.faculty'] = facultyId;
+        }
+
+        if (year) {
+            updateData['allocation.year'] = year;
+        }
+
+        if (capacity) {
+            if (![2, 4, 6, 8].includes(Number(capacity))) {
+                return res.status(400).json({ message: 'Capacity must be 2, 4, 6, or 8' });
+            }
+            updateData['allocation.capacity'] = Number(capacity);
+        }
+
+        const result = await Room.updateMany(
+            { _id: { $in: roomIds } },
+            { $set: updateData }
+        );
+
+        res.status(200).json({
+            message: `Successfully updated ${result.modifiedCount} rooms`,
+            modifiedCount: result.modifiedCount,
+            matchedCount: result.matchedCount
+        });
+    } catch (error) {
+        console.error('Error in bulk room update:', error);
+        res.status(500).json({ message: 'Server error during bulk room update' });
+    }
+};
+
 // @route   PUT /api/admin/room/:roomId/assets
 // @desc    Update Room Assets
 exports.updateRoomAssets = async (req, res) => {
@@ -796,5 +847,392 @@ exports.unassignStudent = async (req, res) => {
     } catch (error) {
         console.error('Error unassigning student:', error);
         res.status(500).json({ message: 'Server error unassigning student' });
+    }
+};
+
+// @route   PUT /api/admin/students/:id
+// @desc    Update student details
+exports.updateStudent = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { firstName, lastName, indexNumber, faculty, year, email } = req.body;
+
+        const student = await Student.findById(id);
+        if (!student) {
+            return res.status(404).json({ message: 'Student not found' });
+        }
+
+        if (firstName) student.firstName = firstName;
+        if (lastName) student.lastName = lastName;
+
+        // Automatically sync the combined name if both are present or individually updated
+        if (firstName || lastName) {
+            student.name = `${student.firstName || ''} ${student.lastName || ''}`.trim();
+        }
+
+        if (indexNumber) student.indexNumber = indexNumber;
+        if (faculty) student.faculty = faculty;
+
+        // If year changes and student is assigned to a room, sync the room's year level
+        if (year && year !== student.year && student.assignedRoom) {
+            await Room.findByIdAndUpdate(student.assignedRoom, {
+                $set: { 'allocation.year': year }
+            });
+        }
+
+        if (year) student.year = year;
+        if (email !== undefined) student.email = email;
+
+        await student.save();
+        res.status(200).json({ message: 'Student updated successfully', student });
+    } catch (error) {
+        console.error('Error updating student:', error);
+        res.status(500).json({ message: 'Server error updating student' });
+    }
+};
+
+// @route   DELETE /api/admin/students/:id
+// @desc    Delete student and free room capacity
+exports.deleteStudent = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const student = await Student.findById(id);
+
+        if (!student) {
+            return res.status(404).json({ message: 'Student not found' });
+        }
+
+        // Deleting student is enough as our layout logic fetches students based on assignedRoom index
+        await Student.findByIdAndDelete(id);
+
+        res.status(200).json({ message: 'Student deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting student:', error);
+        res.status(500).json({ message: 'Server error deleting student' });
+    }
+};
+
+// @route   POST /api/admin/students/rollover
+// @desc    Academic Year Rollover: Targeted deletion or promotion
+exports.academicRollover = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+        const { facultyId, year, roomStrategy } = req.body;
+
+        // Build base query
+        const query = {};
+        if (facultyId && facultyId !== 'all') {
+            query.faculty = facultyId;
+        }
+
+        const studentUpdateMod = {};
+        if (roomStrategy === 'vacate') {
+            studentUpdateMod.assignedRoom = null;
+        }
+
+        if (year === 'all') {
+            // Global Rollover
+            const deleteResult = await Student.deleteMany({ ...query, year: '4' }).session(session);
+
+            await Student.updateMany({ ...query, year: '3' }, { $set: { year: '4', ...studentUpdateMod } }).session(session);
+            await Student.updateMany({ ...query, year: '2' }, { $set: { year: '3', ...studentUpdateMod } }).session(session);
+            await Student.updateMany({ ...query, year: '1' }, { $set: { year: '2', ...studentUpdateMod } }).session(session);
+
+            if (roomStrategy === 'upgrade') {
+                const roomQuery = (facultyId && facultyId !== 'all') ? { 'allocation.faculty': facultyId } : {};
+                await Room.updateMany({ ...roomQuery, 'allocation.year': '3' }, { $set: { 'allocation.year': '4' } }).session(session);
+                await Room.updateMany({ ...roomQuery, 'allocation.year': '2' }, { $set: { 'allocation.year': '3' } }).session(session);
+                await Room.updateMany({ ...roomQuery, 'allocation.year': '1' }, { $set: { 'allocation.year': '2' } }).session(session);
+            }
+
+            await session.commitTransaction();
+            res.status(200).json({
+                message: 'Global rollover completed',
+                graduatedCount: deleteResult.deletedCount
+            });
+        } else {
+            // Targeted Rollover
+            if (year === '4') {
+                const result = await Student.deleteMany({ ...query, year: '4' }).session(session);
+                await session.commitTransaction();
+                res.status(200).json({ message: `Graduated ${result.deletedCount} students from Year 4`, graduatedCount: result.deletedCount });
+            } else {
+                const nextYear = (parseInt(year) + 1).toString();
+                const result = await Student.updateMany({ ...query, year }, { $set: { year: nextYear, ...studentUpdateMod } }).session(session);
+
+                if (roomStrategy === 'upgrade') {
+                    const roomQuery = { 'allocation.year': year };
+                    if (facultyId && facultyId !== 'all') roomQuery['allocation.faculty'] = facultyId;
+                    await Room.updateMany(roomQuery, { $set: { 'allocation.year': nextYear } }).session(session);
+                }
+
+                await session.commitTransaction();
+                res.status(200).json({ message: `Promoted ${result.modifiedCount} students to Year ${nextYear}` });
+            }
+        }
+    } catch (error) {
+        await session.abortTransaction();
+        console.error('Error during academic rollover:', error);
+        res.status(500).json({ message: 'Server error during targeted rollover' });
+    } finally {
+        session.endSession();
+    }
+};
+// @route   GET /api/admin/students
+// @desc    Get all students with advanced filtering and global stats
+exports.getStudents = async (req, res) => {
+    try {
+        const { faculty, year, status, search, page = 1, limit = 15 } = req.query;
+
+        const filter = {};
+
+        if (faculty && mongoose.Types.ObjectId.isValid(faculty)) {
+            filter.faculty = faculty;
+        }
+
+        if (year) {
+            filter.year = year;
+        }
+
+        if (status === 'assigned') {
+            filter.assignedRoom = { $ne: null };
+        } else if (status === 'unassigned') {
+            filter.assignedRoom = null;
+        }
+
+        if (search) {
+            filter.$or = [
+                { name: new RegExp(search, 'i') },
+                { firstName: new RegExp(search, 'i') },
+                { lastName: new RegExp(search, 'i') },
+                { indexNumber: new RegExp(search, 'i') }
+            ];
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const [students, totalFiltered, stats] = await Promise.all([
+            Student.find(filter)
+                .skip(skip)
+                .limit(parseInt(limit))
+                .populate('faculty')
+                .populate({
+                    path: 'assignedRoom',
+                    populate: { path: 'hostel', select: 'officialName alias' }
+                })
+                .sort({ createdAt: -1 }),
+            Student.countDocuments(filter),
+            Promise.all([
+                Student.countDocuments({}),
+                Student.countDocuments({ assignedRoom: { $ne: null } }),
+                Student.countDocuments({ assignedRoom: null })
+            ])
+        ]);
+
+        res.status(200).json({
+            students,
+            stats: {
+                total: stats[0],
+                assigned: stats[1],
+                unassigned: stats[2]
+            },
+            pagination: {
+                total: totalFiltered,
+                page: parseInt(page),
+                pages: Math.ceil(totalFiltered / parseInt(limit))
+            }
+        });
+
+    } catch (error) {
+        console.error('Error fetching students:', error);
+        res.status(500).json({ message: 'Server error fetching students' });
+    }
+};
+
+// @route   GET /api/admin/hostels/capacity-stats
+// @desc    Get real-time capacity and occupancy statistics
+exports.getHostelCapacityStats = async (req, res) => {
+    try {
+        const stats = await Room.aggregate([
+            {
+                $group: {
+                    _id: "$hostel",
+                    totalCapacity: { $sum: { $ifNull: ["$allocation.capacity", 0] } },
+                    roomIds: { $push: "$_id" }
+                }
+            },
+            {
+                $lookup: {
+                    from: "students",
+                    localField: "roomIds",
+                    foreignField: "assignedRoom",
+                    as: "residents"
+                }
+            },
+            {
+                $lookup: {
+                    from: "hostels",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "hostelDetails"
+                }
+            },
+            {
+                $unwind: "$hostelDetails"
+            },
+            {
+                $project: {
+                    _id: 1,
+                    name: "$hostelDetails.officialName",
+                    alias: "$hostelDetails.alias",
+                    totalCapacity: 1,
+                    filledBeds: { $size: "$residents" },
+                    availableBeds: { $subtract: ["$totalCapacity", { $size: "$residents" }] },
+                    occupancyRate: {
+                        $cond: [
+                            { $eq: ["$totalCapacity", 0] },
+                            0,
+                            { $multiply: [{ $divide: [{ $size: "$residents" }, "$totalCapacity"] }, 100] }
+                        ]
+                    }
+                }
+            },
+            { $sort: { name: 1 } }
+        ]);
+
+        const globalStats = stats.reduce((acc, curr) => ({
+            totalCapacity: acc.totalCapacity + curr.totalCapacity,
+            filledBeds: acc.filledBeds + curr.filledBeds,
+            availableBeds: acc.availableBeds + curr.availableBeds
+        }), { totalCapacity: 0, filledBeds: 0, availableBeds: 0 });
+
+        globalStats.occupancyRate = globalStats.totalCapacity > 0
+            ? (globalStats.filledBeds / globalStats.totalCapacity) * 100
+            : 0;
+
+        res.status(200).json({
+            hostels: stats,
+            global: globalStats
+        });
+
+    } catch (error) {
+        console.error('Error fetching capacity stats:', error);
+        res.status(500).json({ message: 'Server error generating capacity analytics' });
+    }
+};
+
+// @route   GET /api/admin/reports/maintenance
+// @desc    Get paginated maintenance report for broken assets
+exports.getMaintenanceReport = async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 15;
+        const { issueType } = req.query;
+
+        const skip = (page - 1) * limit;
+
+        const aggregation = [
+            // 1. Start with Rooms
+            {
+                $project: {
+                    hostel: 1,
+                    floor: 1,
+                    roomNumber: 1,
+                    locationType: { $literal: 'Room' },
+                    assets: { $objectToArray: "$assets" }
+                }
+            },
+            { $unwind: "$assets" },
+            { $match: { "assets.v.notWorking": { $gt: 0 } } },
+
+            // 2. Union with Common Areas
+            {
+                $unionWith: {
+                    coll: "commonareas",
+                    pipeline: [
+                        {
+                            $project: {
+                                hostel: 1,
+                                floor: 1,
+                                roomNumber: "$type",
+                                locationType: { $literal: 'CommonArea' },
+                                assets: { $objectToArray: "$assets" }
+                            }
+                        },
+                        { $unwind: "$assets" },
+                        { $match: { "assets.v.notWorking": { $gt: 0 } } }
+                    ]
+                }
+            },
+
+            // 3. Lookup Hostel Info
+            {
+                $lookup: {
+                    from: "hostels",
+                    localField: "hostel",
+                    foreignField: "_id",
+                    as: "hostelDetails"
+                }
+            },
+            { $unwind: "$hostelDetails" },
+
+            // 4. Map to final structure
+            {
+                $project: {
+                    _id: { $concat: [{ $toString: "$_id" }, "-", "$assets.k"] },
+                    location: {
+                        $concat: [
+                            "$hostelDetails.officialName",
+                            " - Floor ",
+                            { $toString: "$floor" },
+                            " - ",
+                            { $cond: [{ $eq: ["$locationType", "Room"] }, "Room ", ""] },
+                            "$roomNumber"
+                        ]
+                    },
+                    assetName: "$assets.k",
+                    brokenCount: "$assets.v.notWorking",
+                    totalCount: { $add: ["$assets.v.working", "$assets.v.notWorking"] },
+                    locationType: 1,
+                    floor: 1,
+                    hostelName: "$hostelDetails.officialName"
+                }
+            }
+        ];
+
+        // 5. Apply issueType filter if provided
+        if (issueType && issueType !== 'all') {
+            aggregation.push({
+                $match: { assetName: new RegExp(issueType, 'i') }
+            });
+        }
+
+        // 6. Get total count for pagination (before slicing)
+        const totalCountAgg = [...aggregation, { $count: "total" }];
+        const totalCountResult = await Room.aggregate(totalCountAgg);
+        const totalCount = totalCountResult[0]?.total || 0;
+
+        // 7. Apply pagination
+        aggregation.push({ $sort: { floor: 1, location: 1 } });
+
+        // Handle "export" cases where limit is bypassed
+        if (req.query.export !== 'true') {
+            aggregation.push({ $skip: skip });
+            aggregation.push({ $limit: limit });
+        }
+
+        const issues = await Room.aggregate(aggregation);
+
+        res.status(200).json({
+            issues,
+            totalCount,
+            totalPages: Math.ceil(totalCount / limit),
+            currentPage: page
+        });
+
+    } catch (error) {
+        console.error('Error generating maintenance report:', error);
+        res.status(500).json({ message: 'Server error generating reports' });
     }
 };

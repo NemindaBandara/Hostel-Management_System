@@ -87,6 +87,10 @@ router.delete('/hostel/:hostelId/design', adminController.deleteHostelDesign);
 // @desc    Configure Room Allocation Rules
 router.put('/room/:roomId/configure', adminController.configureRoom);
 
+// @route   PUT /api/admin/rooms/bulk-update
+// @desc    Bulk update multiple rooms configuration
+router.put('/rooms/bulk-update', adminController.bulkUpdateRooms);
+
 // @route   PUT /api/admin/room/:roomId
 // @desc    Update Room Allocation and Assets
 router.put('/room/:roomId', adminController.updateRoom);
@@ -115,6 +119,10 @@ router.get('/hostel/:hostelId/layout', adminController.getHostelLayout);
 // @desc    Bulk upload students via CSV
 router.post('/students/bulk', adminController.bulkUploadStudents);
 
+// @route   GET /api/admin/students
+// @desc    Get all students with advanced filtering and global stats
+router.get('/students', adminController.getStudents);
+
 // @route   POST /api/admin/student
 // @desc    Add a single student
 router.post('/student', adminController.addStudent);
@@ -122,7 +130,26 @@ router.post('/student', adminController.addStudent);
 // @route   GET /api/admin/students/count
 // @desc    Get aggregate student counts (supports filtering by year/faculty)
 router.get('/students/count', adminController.getStudentCount);
+const bulkAllocationController = require('../controllers/bulkAllocationController');
+
+// ... existing routes ...
+
 router.get('/students/unassigned', adminController.getUnassignedStudents);
 router.put('/student/:studentId/unassign', adminController.unassignStudent);
+
+// @route   POST /api/admin/allocate/bulk-smart
+// @desc    Smart Bulk Student Allocation (Dry-run supported)
+router.post('/allocate/bulk-smart', bulkAllocationController.bulkSmartAllocate);
+
+// Student CRUD and Rollover
+router.put('/students/:id', adminController.updateStudent);
+router.delete('/students/:id', adminController.deleteStudent);
+router.post('/students/rollover', adminController.academicRollover);
+
+// Capacity Analytics
+router.get('/hostels/capacity-stats', adminController.getHostelCapacityStats);
+
+// Maintenance Reporting
+router.get('/reports/maintenance', adminController.getMaintenanceReport);
 
 module.exports = router;
