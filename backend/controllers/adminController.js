@@ -5,6 +5,8 @@ const Faculty = require('../models/Faculty');
 const Student = require('../models/Student');
 const CommonArea = require('../models/CommonArea');
 const MaintenanceTicket = require('../models/MaintenanceTicket');
+const migrateRoomGender = require('../scripts/migrate-room-gender');
+const fixGenderMismatches = require('../scripts/fix-gender-mismatches');
 
 // @route   PUT /api/admin/hostel/:hostelId
 // @desc    Edit existing Hostel details
@@ -125,6 +127,7 @@ exports.designHostel = async (req, res) => {
                     hostel: hostelId,
                     floor: floorIndex,
                     roomNumber: roomNumber,
+                    genderType: hostel.gender,
                     isGeneral: true,
                     allocation: {
                         capacity: 4 // default as requested
@@ -399,15 +402,15 @@ exports.allocateStudent = async (req, res) => {
         }
 
         // Fetch Room
-        const room = await Room.findById(roomId).populate('allocation.faculty');
+        const room = await Room.findById(roomId).populate('allocation.faculty').populate('hostel');
         if (!room) {
             return res.status(404).json({ message: 'Room not found' });
         }
 
-        // Check Gender Match
-        if (room.genderType !== 'Neutral' && room.genderType !== student.sex) {
+        // Check Hostel Gender Match
+        if (room.hostel.gender !== student.sex) {
             return res.status(400).json({
-                message: `Gender Mismatch: This room is reserved for ${room.genderType} students.`
+                message: `Gender Mismatch: This building is reserved for ${room.hostel.gender} students.`
             });
         }
 
@@ -434,9 +437,9 @@ exports.allocateStudent = async (req, res) => {
         student.assignedRoom = roomId;
         await student.save();
 
-        // If room was Neutral, set its genderType now
-        if (room.genderType === 'Neutral') {
-            room.genderType = student.sex;
+        // If room genderType isn't already set to hostel gender (e.g. legacy Neutral), force it now
+        if (room.genderType !== room.hostel.gender) {
+            room.genderType = room.hostel.gender;
             await room.save();
         }
 
@@ -1274,5 +1277,36 @@ exports.resolveMaintenanceTicket = async (req, res) => {
     } catch (error) {
         console.error('Error resolving maintenance ticket:', error);
         res.status(500).json({ message: 'Server error resolving maintenance issue' });
+    }
+};
+
+// @route   POST /api/admin/room-gender-migration
+// @desc    Trigger one-time migration to set genderType for occupied rooms
+exports.runGenderMigration = async (req, res) => {
+    try {
+        const count = await migrateRoomGender();
+        res.json({
+            success: true,
+            message: `Migration successful. ${count} rooms updated based on current occupants.`
+        });
+    } catch (error) {
+        console.error('Migration endpoint error:', error);
+        res.status(500).json({ message: 'Internal server error during migration.' });
+    }
+};
+
+// @route   POST /api/admin/fix-gender-mismatches
+// @desc    Diagnose and unassign students whose gender doesn't match their hostel
+exports.runGenderFix = async (req, res) => {
+    try {
+        const mismatches = await fixGenderMismatches();
+        res.json({
+            success: true,
+            totalMismatches: mismatches.length,
+            mismatches
+        });
+    } catch (error) {
+        console.error('Gender fix endpoint error:', error);
+        res.status(500).json({ message: 'Internal server error during gender fix.' });
     }
 };

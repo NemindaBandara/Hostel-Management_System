@@ -146,10 +146,14 @@ router.put('/students/:id', adminController.updateStudent);
 router.delete('/students/:id', adminController.deleteStudent);
 router.post('/students/rollover', adminController.academicRollover);
 
-// Capacity Analytics
 router.get('/hostels/capacity-stats', adminController.getHostelCapacityStats);
 
 // Maintenance Reporting
 router.get('/reports/maintenance', adminController.getMaintenanceReport);
+router.patch('/reports/:ticketId/resolve', adminController.resolveMaintenanceTicket);
+
+// Migration
+router.post('/room-gender-migration', adminController.runGenderMigration);
+router.post('/fix-gender-mismatches', adminController.runGenderFix);
 
 module.exports = router;

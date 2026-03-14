@@ -25,6 +25,11 @@ const studentSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Faculty',
     },
+    sex: {
+        type: String,
+        enum: ['Male', 'Female'],
+        required: true,
+    },
     assignedRoom: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Room',
