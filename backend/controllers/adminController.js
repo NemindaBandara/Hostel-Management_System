@@ -4,6 +4,7 @@ const Room = require('../models/Room');
 const Faculty = require('../models/Faculty');
 const Student = require('../models/Student');
 const CommonArea = require('../models/CommonArea');
+const MaintenanceTicket = require('../models/MaintenanceTicket');
 
 // @route   PUT /api/admin/hostel/:hostelId
 // @desc    Edit existing Hostel details
@@ -403,22 +404,23 @@ exports.allocateStudent = async (req, res) => {
             return res.status(404).json({ message: 'Room not found' });
         }
 
-        // Check if room has been configured
-        if (!room.allocation.capacity) {
-            return res.status(400).json({ message: 'Room capacity is not configured.' });
+        // Check Gender Match
+        if (room.genderType !== 'Neutral' && room.genderType !== student.sex) {
+            return res.status(400).json({
+                message: `Gender Mismatch: This room is reserved for ${room.genderType} students.`
+            });
         }
 
         // Check Capacity
         const currentStudentsCount = await Student.countDocuments({ assignedRoom: roomId });
-        if (currentStudentsCount >= room.allocation.capacity) {
+        if (currentStudentsCount >= (room.allocation.capacity || 4)) {
             return res.status(400).json({ message: 'This room is full and cannot accept more students.' });
         }
 
         // Check Faculty Match
         if (!room.isGeneral) {
-            // It's a reserved room
             const roomFacultyId = room.allocation.faculty ? room.allocation.faculty._id.toString() : null;
-            const studentFacultyId = student.faculty._id.toString();
+            const studentFacultyId = student.faculty?._id.toString();
 
             if (roomFacultyId !== studentFacultyId) {
                 const requiredFacultyName = room.allocation.faculty ? room.allocation.faculty.name : 'Unknown';
@@ -431,6 +433,12 @@ exports.allocateStudent = async (req, res) => {
         // If everything is fine, assign the student
         student.assignedRoom = roomId;
         await student.save();
+
+        // If room was Neutral, set its genderType now
+        if (room.genderType === 'Neutral') {
+            room.genderType = student.sex;
+            await room.save();
+        }
 
         res.status(200).json({
             message: `Student ${student.name} successfully allocated to Room ${room.roomNumber}`,
@@ -504,12 +512,27 @@ exports.getHostelLayout = async (req, res) => {
             return res.status(400).json({ message: 'Invalid Hostel ID format' });
         }
 
-        // Fetch all rooms, common areas, and students for this hostel
-        const [rooms, commonAreas, students] = await Promise.all([
+        // Fetch all rooms, common areas, students, and pending maintenance tickets for this hostel
+        const [rooms, commonAreas, students, pendingTickets] = await Promise.all([
             Room.find({ hostel: hostelId }).populate('allocation.faculty'),
             CommonArea.find({ hostel: hostelId }),
-            Student.find({ assignedRoom: { $in: (await Room.find({ hostel: hostelId }).select('_id')).map(r => r._id) } })
+            Student.find({ assignedRoom: { $in: (await Room.find({ hostel: hostelId }).select('_id')).map(r => r._id) } }),
+            MaintenanceTicket.find({ 
+                status: 'Pending', 
+                locationId: { $in: [
+                    ...(await Room.find({ hostel: hostelId }).select('_id')).map(r => r._id),
+                    ...(await CommonArea.find({ hostel: hostelId }).select('_id')).map(a => a._id)
+                ] }
+            })
         ]);
+
+        // Map tickets to their locations
+        const ticketMap = {};
+        pendingTickets.forEach(ticket => {
+            const lid = ticket.locationId.toString();
+            if (!ticketMap[lid]) ticketMap[lid] = [];
+            ticketMap[lid].push(ticket);
+        });
 
         // Map students to their rooms
         const studentMap = {};
@@ -536,15 +559,18 @@ exports.getHostelLayout = async (req, res) => {
 
         rooms.forEach((room) => {
             ensureFloor(room.floor);
-            // Convert to object and inject students
+            // Convert to object and inject students and pending tickets
             const roomObj = room.toObject();
             roomObj.students = studentMap[room._id.toString()] || [];
+            roomObj.pendingTickets = ticketMap[room._id.toString()] || [];
             layout[room.floor].rooms.push(roomObj);
         });
 
         commonAreas.forEach((area) => {
             ensureFloor(area.floor);
-            layout[area.floor].commonAreas.push(area);
+            const areaObj = area.toObject();
+            areaObj.pendingTickets = ticketMap[area._id.toString()] || [];
+            layout[area.floor].commonAreas.push(areaObj);
         });
 
         // Convert the layout object dictionary into the expected structured array format for the frontend
@@ -700,6 +726,13 @@ exports.bulkUploadStudents = async (req, res) => {
                 delete cleanStudent.faculty;
             }
 
+            // Normalize sex column (handle 'gender' or 'sex')
+            const genderVal = cleanStudent.sex || cleanStudent.gender || cleanStudent.Sex || cleanStudent.Gender;
+            if (genderVal) {
+                const normGender = genderVal.toString().toLowerCase().startsWith('m') ? 'Male' : 'Female';
+                cleanStudent.sex = normGender;
+            }
+
             return {
                 updateOne: {
                     filter: { indexNumber: cleanStudent.indexNumber },
@@ -726,10 +759,10 @@ exports.bulkUploadStudents = async (req, res) => {
 // @desc    Add a single student
 exports.addStudent = async (req, res) => {
     try {
-        const { firstName, lastName, indexNumber, email, faculty, year } = req.body;
+        const { firstName, lastName, indexNumber, email, faculty, year, sex } = req.body;
 
-        if (!indexNumber) {
-            return res.status(400).json({ message: 'Index Number is required' });
+        if (!indexNumber || !sex) {
+            return res.status(400).json({ message: 'Index Number and Sex are required' });
         }
 
         // Check for duplicates
@@ -744,7 +777,8 @@ exports.addStudent = async (req, res) => {
             name: `${firstName || ''} ${lastName || ''}`.trim(),
             indexNumber,
             email,
-            year
+            year,
+            sex
         };
 
         // Try mapping faculty if provided
@@ -983,7 +1017,7 @@ exports.academicRollover = async (req, res) => {
 // @desc    Get all students with advanced filtering and global stats
 exports.getStudents = async (req, res) => {
     try {
-        const { faculty, year, status, search, page = 1, limit = 15 } = req.query;
+        const { faculty, year, status, search, sex, page = 1, limit = 15 } = req.query;
 
         const filter = {};
 
@@ -993,6 +1027,10 @@ exports.getStudents = async (req, res) => {
 
         if (year) {
             filter.year = year;
+        }
+
+        if (sex) {
+            filter.sex = sex;
         }
 
         if (status === 'assigned') {
@@ -1123,116 +1161,118 @@ exports.getHostelCapacityStats = async (req, res) => {
 };
 
 // @route   GET /api/admin/reports/maintenance
-// @desc    Get paginated maintenance report for broken assets
+// @desc    Get paginated maintenance report for broken assets (based on tickets)
 exports.getMaintenanceReport = async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 15;
-        const { issueType } = req.query;
+        const { status = 'Pending', issueType } = req.query;
 
         const skip = (page - 1) * limit;
 
-        const aggregation = [
-            // 1. Start with Rooms
-            {
-                $project: {
-                    hostel: 1,
-                    floor: 1,
-                    roomNumber: 1,
-                    locationType: { $literal: 'Room' },
-                    assets: { $objectToArray: "$assets" }
-                }
-            },
-            { $unwind: "$assets" },
-            { $match: { "assets.v.notWorking": { $gt: 0 } } },
+        const query = {};
+        if (status !== 'all') {
+            query.status = status;
+        }
 
-            // 2. Union with Common Areas
-            {
-                $unionWith: {
-                    coll: "commonareas",
-                    pipeline: [
-                        {
-                            $project: {
-                                hostel: 1,
-                                floor: 1,
-                                roomNumber: "$type",
-                                locationType: { $literal: 'CommonArea' },
-                                assets: { $objectToArray: "$assets" }
-                            }
-                        },
-                        { $unwind: "$assets" },
-                        { $match: { "assets.v.notWorking": { $gt: 0 } } }
-                    ]
-                }
-            },
-
-            // 3. Lookup Hostel Info
-            {
-                $lookup: {
-                    from: "hostels",
-                    localField: "hostel",
-                    foreignField: "_id",
-                    as: "hostelDetails"
-                }
-            },
-            { $unwind: "$hostelDetails" },
-
-            // 4. Map to final structure
-            {
-                $project: {
-                    _id: { $concat: [{ $toString: "$_id" }, "-", "$assets.k"] },
-                    location: {
-                        $concat: [
-                            "$hostelDetails.officialName",
-                            " - Floor ",
-                            { $toString: "$floor" },
-                            " - ",
-                            { $cond: [{ $eq: ["$locationType", "Room"] }, "Room ", ""] },
-                            "$roomNumber"
-                        ]
-                    },
-                    assetName: "$assets.k",
-                    brokenCount: "$assets.v.notWorking",
-                    totalCount: { $add: ["$assets.v.working", "$assets.v.notWorking"] },
-                    locationType: 1,
-                    floor: 1,
-                    hostelName: "$hostelDetails.officialName"
-                }
-            }
-        ];
-
-        // 5. Apply issueType filter if provided
         if (issueType && issueType !== 'all') {
-            aggregation.push({
-                $match: { assetName: new RegExp(issueType, 'i') }
-            });
+            query.assetKey = new RegExp(issueType, 'i');
         }
 
-        // 6. Get total count for pagination (before slicing)
-        const totalCountAgg = [...aggregation, { $count: "total" }];
-        const totalCountResult = await Room.aggregate(totalCountAgg);
-        const totalCount = totalCountResult[0]?.total || 0;
+        const [tickets, totalCount] = await Promise.all([
+            MaintenanceTicket.find(query)
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit)
+                .populate('reportedBy', 'name indexNumber'),
+            MaintenanceTicket.countDocuments(query)
+        ]);
 
-        // 7. Apply pagination
-        aggregation.push({ $sort: { floor: 1, location: 1 } });
+        // Enrich tickets with location details manually (since locationId is dynamic)
+        const enrichedTickets = await Promise.all(tickets.map(async (ticket) => {
+            let location;
+            if (ticket.locationType === 'Room') {
+                location = await Room.findById(ticket.locationId).populate('hostel', 'officialName');
+            } else {
+                location = await CommonArea.findById(ticket.locationId).populate('hostel', 'officialName');
+            }
 
-        // Handle "export" cases where limit is bypassed
-        if (req.query.export !== 'true') {
-            aggregation.push({ $skip: skip });
-            aggregation.push({ $limit: limit });
-        }
-
-        const issues = await Room.aggregate(aggregation);
+            const ticketObj = ticket.toObject();
+            if (location) {
+                const locName = ticket.locationType === 'Room' 
+                    ? `Room ${location.roomNumber}` 
+                    : `${location.type}`;
+                ticketObj.locationDetails = `${location.hostel?.officialName} - Floor ${location.floor} - ${locName}`;
+            } else {
+                ticketObj.locationDetails = 'Unknown Location';
+            }
+            return ticketObj;
+        }));
 
         res.status(200).json({
-            issues,
+            issues: enrichedTickets,
             totalCount,
             totalPages: Math.ceil(totalCount / limit),
             currentPage: page
         });
 
     } catch (error) {
-        console.error('Error generating maintenance report:', error);
+        console.error('Error fetching maintenance report:', error);
         res.status(500).json({ message: 'Server error generating reports' });
+    }
+};
+
+// @route   PATCH /api/admin/reports/:ticketId/resolve
+// @desc    Resolve a maintenance ticket and sync with Room/CommonArea assets
+exports.resolveMaintenanceTicket = async (req, res) => {
+    try {
+        const { ticketId } = req.params;
+
+        const ticket = await MaintenanceTicket.findById(ticketId);
+        if (!ticket) {
+            return res.status(404).json({ message: 'Maintenance ticket not found' });
+        }
+
+        if (ticket.status === 'Resolved') {
+            return res.status(400).json({ message: 'Ticket is already resolved' });
+        }
+
+        let location;
+        if (ticket.locationType === 'Room') {
+            location = await Room.findById(ticket.locationId);
+        } else {
+            location = await CommonArea.findById(ticket.locationId);
+        }
+
+        if (!location) {
+            return res.status(404).json({ message: 'Associated location not found' });
+        }
+
+        const asset = location.assets[ticket.assetKey];
+        if (!asset) {
+            return res.status(400).json({ message: 'Asset key mismatch in location' });
+        }
+
+        // Logic check: only increment working if notWorking > 0
+        if (asset.notWorking > 0) {
+            asset.working += 1;
+            asset.notWorking -= 1;
+            
+            location.markModified(`assets.${ticket.assetKey}`);
+            await location.save();
+        }
+
+        ticket.status = 'Resolved';
+        ticket.resolvedAt = new Date();
+        await ticket.save();
+
+        res.status(200).json({ 
+            message: 'Asset updated and issue resolved successfully', 
+            ticket 
+        });
+
+    } catch (error) {
+        console.error('Error resolving maintenance ticket:', error);
+        res.status(500).json({ message: 'Server error resolving maintenance issue' });
     }
 };
