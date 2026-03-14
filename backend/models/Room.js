@@ -18,6 +18,11 @@ const roomSchema = new mongoose.Schema({
         type: Boolean,
         default: true
     },
+    genderType: {
+        type: String,
+        enum: ['Male', 'Female', 'Neutral'],
+        default: 'Neutral'
+    },
     allocation: {
         faculty: {
             type: mongoose.Schema.Types.ObjectId,

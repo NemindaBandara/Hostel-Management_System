@@ -19,7 +19,7 @@ exports.bulkSmartAllocate = async (req, res) => {
             isGeneral: false,
             'allocation.faculty': { $ne: null },
             'allocation.year': { $ne: null }
-        }).populate('allocation.faculty');
+        }).populate('allocation.faculty').populate('hostel');
 
         // 3. Get current occupancy for these rooms
         const occupancyMap = await Student.aggregate([
@@ -38,7 +38,8 @@ exports.bulkSmartAllocate = async (req, res) => {
         rooms.forEach(room => {
             const facultyId = room.allocation.faculty._id.toString();
             const year = room.allocation.year;
-            const key = `${facultyId}_${year}`;
+            const hostelGender = room.hostel.gender;
+            const key = `${facultyId}_${year}_${hostelGender}`;
 
             const occupied = currentOccupancy[room._id.toString()] || 0;
             const availableSpaces = room.allocation.capacity - occupied;
@@ -71,10 +72,12 @@ exports.bulkSmartAllocate = async (req, res) => {
         });
 
         unassignedStudents.forEach(student => {
-            if (!student.faculty) return;
+            if (!student.faculty || !student.sex) return;
 
-            const key = `${student.faculty._id.toString()}_${student.year}`;
-            const group = roomGroups[key];
+            // Match with any room in a compatible hostel (ignoring room.genderType)
+            const key = `${student.faculty._id.toString()}_${student.year}_${student.sex}`;
+
+            let group = roomGroups[key];
 
             if (group && group.length > 0) {
                 // Find first room with space
@@ -84,14 +87,16 @@ exports.bulkSmartAllocate = async (req, res) => {
                     studentId: student._id,
                     roomId: roomObj._id,
                     studentName: student.name,
-                    roomNumber: roomObj.roomNumber
+                    roomNumber: roomObj.roomNumber,
+                    targetGender: student.sex // Always ensure room matches student sex
                 });
 
                 // Update summary for reporting
-                const summaryKey = `${student.faculty.name} - Year ${student.year}`;
-                if (summary[summaryKey]) {
-                    summary[summaryKey].matched++;
+                const summaryKey = `${student.faculty.name} - Year ${student.year} (${student.sex})`;
+                if (!summary[summaryKey]) {
+                    summary[summaryKey] = { matched: 0, totalAvailable: 0 };
                 }
+                summary[summaryKey].matched++;
 
                 // Decrement space in our local tracking
                 roomObj.availableSpaces--;
@@ -129,20 +134,31 @@ exports.bulkSmartAllocate = async (req, res) => {
             return res.status(400).json({ message: "No matching students and rooms found." });
         }
 
-        const bulkOps = allocations.map(a => ({
+        const studentOps = allocations.map(a => ({
             updateOne: {
                 filter: { _id: a.studentId },
                 update: { $set: { assignedRoom: a.roomId } }
             }
         }));
 
-        const result = await Student.bulkWrite(bulkOps);
+        // Ensure ALL involved rooms match the building/student gender
+        const roomOps = allocations.map(a => ({
+            updateOne: {
+                filter: { _id: a.roomId },
+                update: { $set: { genderType: a.targetGender } }
+            }
+        }));
+
+        const [studentResult] = await Promise.all([
+            Student.bulkWrite(studentOps),
+            roomOps.length > 0 ? Room.bulkWrite(roomOps) : Promise.resolve()
+        ]);
 
         res.json({
             success: true,
-            message: `Successfully allocated ${result.modifiedCount} students.`,
+            message: `Successfully allocated ${studentResult.modifiedCount} students.`,
             stats: {
-                matched: result.modifiedCount,
+                matched: studentResult.modifiedCount,
                 summary
             }
         });
