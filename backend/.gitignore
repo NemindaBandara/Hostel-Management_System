@@ -1,2 +1,5 @@
 node_modules
 .env
+
+# Security: Initial setup scripts
+scripts/seed-superadmin.js

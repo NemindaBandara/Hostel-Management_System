@@ -3,10 +3,23 @@ const router = express.Router();
 const Hostel = require('../models/Hostel');
 const Faculty = require('../models/Faculty');
 const adminController = require('../controllers/adminController');
+const { protect, authorize } = require('../middleware/authMiddleware');
+
+// Apply protection to ALL admin routes by default
+router.use(protect);
+
+// --- Public/Student Viewable Admin Routes (Read Only) ---
+router.get('/hostels', authorize('SuperAdmin', 'Admin', 'Student'), adminController.getAllHostels);
+router.get('/hostels/capacity-stats', authorize('SuperAdmin', 'Admin', 'Student'), adminController.getHostelCapacityStats);
+router.get('/hostel/:hostelId/layout', authorize('SuperAdmin', 'Admin', 'Student'), adminController.getHostelLayout);
+router.get('/faculties', authorize('SuperAdmin', 'Admin', 'Student'), adminController.getAllFaculties);
+
+// --- Higher Privilege Admin Routes ---
+router.use(authorize('SuperAdmin', 'Admin'));
 
 // @route   POST /api/admin/faculty
 // @desc    Add a New Faculty
-router.post('/faculty', async (req, res) => {
+router.post('/faculty', authorize('SuperAdmin'), async (req, res) => {
     try {
         const { name, color, facultyCode } = req.body;
 
@@ -30,21 +43,18 @@ router.post('/faculty', async (req, res) => {
 // @desc    Mass-update all rooms on a specific floor with a copied asset template
 router.put('/hostel/:hostelId/floor/:floor/bulk-assets', adminController.bulkUpdateFloorAssets);
 
-// @route   GET /api/admin/faculties
-// @desc    Get all Faculties
-router.get('/faculties', adminController.getAllFaculties);
 
 // @route   PUT /api/admin/faculty/:facultyId
 // @desc    Edit existing Faculty
-router.put('/faculty/:facultyId', adminController.updateFaculty);
+router.put('/faculty/:facultyId', authorize('SuperAdmin'), adminController.updateFaculty);
 
 // @route   DELETE /api/admin/faculty/:facultyId
 // @desc    Delete existing Faculty
-router.delete('/faculty/:facultyId', adminController.deleteFaculty);
+router.delete('/faculty/:facultyId', authorize('SuperAdmin'), adminController.deleteFaculty);
 
 // @route   POST /api/admin/hostel
 // @desc    Add a New Hostel
-router.post('/hostel', async (req, res) => {
+router.post('/hostel', authorize('SuperAdmin'), async (req, res) => {
     try {
         const { officialName, alias, gender, numberOfFloors } = req.body;
 
@@ -69,19 +79,19 @@ router.post('/hostel', async (req, res) => {
 
 // @route   PUT /api/admin/hostel/:hostelId
 // @desc    Edit existing Hostel
-router.put('/hostel/:hostelId', adminController.updateHostel);
+router.put('/hostel/:hostelId', authorize('SuperAdmin'), adminController.updateHostel);
 
 // @route   DELETE /api/admin/hostel/:hostelId
 // @desc    Delete Building and cascade layout
-router.delete('/hostel/:hostelId', adminController.deleteHostel);
+router.delete('/hostel/:hostelId', authorize('SuperAdmin'), adminController.deleteHostel);
 
 // @route   POST /api/admin/hostel/:hostelId/design
 // @desc    Design a Hostel (Auto-generate Rooms)
-router.post('/hostel/:hostelId/design', adminController.designHostel);
+router.post('/hostel/:hostelId/design', authorize('SuperAdmin'), adminController.designHostel);
 
 // @route   DELETE /api/admin/hostel/:hostelId/design
 // @desc    Reset a Hostel's floorplan layout
-router.delete('/hostel/:hostelId/design', adminController.deleteHostelDesign);
+router.delete('/hostel/:hostelId/design', authorize('SuperAdmin'), adminController.deleteHostelDesign);
 
 // @route   PUT /api/admin/room/:roomId/configure
 // @desc    Configure Room Allocation Rules
@@ -107,13 +117,6 @@ router.post('/room/:roomId/allocate', adminController.allocateStudent);
 // @desc    Update Common Area Assets
 router.put('/common-area/:commonAreaId/assets', adminController.updateCommonAreaAssets);
 
-// @route   GET /api/admin/hostels
-// @desc    Get all Hostels
-router.get('/hostels', adminController.getAllHostels);
-
-// @route   GET /api/admin/hostel/:hostelId/layout
-// @desc    Get Hostel Layout (Rooms and Common Areas grouped by floor)
-router.get('/hostel/:hostelId/layout', adminController.getHostelLayout);
 
 // @route   POST /api/admin/students/bulk
 // @desc    Bulk upload students via CSV
@@ -146,14 +149,20 @@ router.put('/students/:id', adminController.updateStudent);
 router.delete('/students/:id', adminController.deleteStudent);
 router.post('/students/rollover', adminController.academicRollover);
 
-router.get('/hostels/capacity-stats', adminController.getHostelCapacityStats);
 
 // Maintenance Reporting
 router.get('/reports/maintenance', adminController.getMaintenanceReport);
 router.patch('/reports/:ticketId/resolve', adminController.resolveMaintenanceTicket);
 
 // Migration
-router.post('/room-gender-migration', adminController.runGenderMigration);
-router.post('/fix-gender-mismatches', adminController.runGenderFix);
+router.post('/room-gender-migration', authorize('SuperAdmin'), adminController.runGenderMigration);
+router.post('/fix-gender-mismatches', authorize('SuperAdmin'), adminController.runGenderFix);
+
+// Admin Management (Super Admin Only)
+router.get('/admins', authorize('SuperAdmin'), adminController.getAdmins);
+router.post('/admins', authorize('SuperAdmin'), adminController.createAdmin);
+router.put('/admins/:id', authorize('SuperAdmin'), adminController.updateAdmin);
+router.put('/admins/:id/hostel', authorize('SuperAdmin'), adminController.updateAdminHostel);
+router.delete('/admins/:id', authorize('SuperAdmin'), adminController.deleteAdmin);
 
 module.exports = router;

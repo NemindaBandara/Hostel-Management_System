@@ -5,6 +5,7 @@ const Faculty = require('../models/Faculty');
 const Student = require('../models/Student');
 const CommonArea = require('../models/CommonArea');
 const MaintenanceTicket = require('../models/MaintenanceTicket');
+const User = require('../models/User');
 const migrateRoomGender = require('../scripts/migrate-room-gender');
 const fixGenderMismatches = require('../scripts/fix-gender-mismatches');
 
@@ -487,7 +488,16 @@ exports.updateCommonAreaAssets = async (req, res) => {
 // @desc    Get all Hostels
 exports.getAllHostels = async (req, res) => {
     try {
-        const hostels = await Hostel.find().lean();
+        let filter = {};
+        if (req.user.role === 'Admin') {
+            const managedIds = req.user.managedHostelIds || [];
+            if (managedIds.length === 0) {
+                return res.status(200).json([]); // Return empty if no hostels assigned
+            }
+            filter = { _id: { $in: managedIds } };
+        }
+
+        const hostels = await Hostel.find(filter).lean();
 
         // Add a boolean indicating if a floorplan has been generated
         const hostelsWithDesignStatus = await Promise.all(hostels.map(async (hostel) => {
@@ -513,6 +523,11 @@ exports.getHostelLayout = async (req, res) => {
 
         if (!mongoose.Types.ObjectId.isValid(hostelId)) {
             return res.status(400).json({ message: 'Invalid Hostel ID format' });
+        }
+
+        // Strict Scoping Check
+        if (req.user.role === 'Admin' && !req.user.managedHostelIds?.map(id => id.toString()).includes(hostelId)) {
+            return res.status(403).json({ message: '403 Forbidden: You are not authorized to access this hostel layout' });
         }
 
         // Fetch all rooms, common areas, students, and pending maintenance tickets for this hostel
@@ -695,46 +710,74 @@ exports.deleteFaculty = async (req, res) => {
 // @route   POST /api/admin/students/bulk
 // @desc    Bulk upload students via CSV
 exports.bulkUploadStudents = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
         const { students } = req.body;
 
         if (!students || !Array.isArray(students) || students.length === 0) {
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({ message: 'Invalid or empty students data provided' });
         }
 
-        // Pre-fetch faculties to map string IDs efficiently
-        const dbFaculties = await Faculty.find();
+        // 1. Pre-fetch faculties for mapping
+        const dbFaculties = await Faculty.find().session(session);
         const facultyLookup = {};
         dbFaculties.forEach(f => {
             facultyLookup[f.name.toLowerCase()] = f._id;
             if (f.facultyCode) facultyLookup[f.facultyCode.toLowerCase()] = f._id;
         });
 
-        // Upsert logic: if indexNumber exists, update existing record, else create new
-        const operations = students.map((student) => {
-            // Map the parsed name, handle combined old 'name' requirement
-            const cleanStudent = { ...student };
+        // 2. Identify unique emails and pre-fetch existing Users
+        const studentEmails = [...new Set(students.map(s => s.email?.toLowerCase()).filter(Boolean))];
+        const existingUsers = await User.find({ email: { $in: studentEmails } }).session(session);
+        const userMap = new Map(); // email -> userId
+        existingUsers.forEach(u => userMap.set(u.email.toLowerCase(), u._id));
+
+        // 3. Prepare list of new Users to be created
+        const usersToCreate = [];
+        const processedEmails = new Set();
+
+        students.forEach(s => {
+            const email = s.email?.toLowerCase();
+            if (email && !userMap.has(email) && !processedEmails.has(email)) {
+                usersToCreate.push({
+                    email,
+                    password: s.indexNumber, // Initial password is indexNumber
+                    role: 'Student',
+                    isFirstLogin: true
+                });
+                processedEmails.add(email);
+            }
+        });
+
+        // 4. Batch create missing Users (triggers pre-save hashing)
+        if (usersToCreate.length > 0) {
+            const newUsers = await User.create(usersToCreate, { session });
+            newUsers.forEach(u => userMap.set(u.email.toLowerCase(), u._id));
+        }
+
+        // 5. Prepare Student bulk operations
+        const studentOps = students.map(studentData => {
+            const cleanStudent = { ...studentData };
+            const email = cleanStudent.email?.toLowerCase();
+            
             cleanStudent.name = `${cleanStudent.firstName || ''} ${cleanStudent.lastName || ''}`.trim();
 
-            // Map the faculty string to ObjectId if match exists, otherwise drop it to prevent BSONError
-            let facultyId = undefined;
             if (cleanStudent.faculty) {
                 const facStr = cleanStudent.faculty.toString().toLowerCase();
-                facultyId = facultyLookup[facStr];
+                const facultyId = facultyLookup[facStr];
+                if (facultyId) cleanStudent.faculty = facultyId;
+                else delete cleanStudent.faculty;
             }
 
-            if (facultyId) {
-                cleanStudent.faculty = facultyId;
-            } else {
-                delete cleanStudent.faculty;
-            }
-
-            // Normalize sex column (handle 'gender' or 'sex')
             const genderVal = cleanStudent.sex || cleanStudent.gender || cleanStudent.Sex || cleanStudent.Gender;
             if (genderVal) {
-                const normGender = genderVal.toString().toLowerCase().startsWith('m') ? 'Male' : 'Female';
-                cleanStudent.sex = normGender;
+                cleanStudent.sex = genderVal.toString().toLowerCase().startsWith('m') ? 'Male' : 'Female';
             }
+
+            cleanStudent.userId = userMap.get(email);
 
             return {
                 updateOne: {
@@ -745,7 +788,11 @@ exports.bulkUploadStudents = async (req, res) => {
             };
         });
 
-        const result = await Student.bulkWrite(operations);
+        // 6. Execute Student bulk write
+        const result = await Student.bulkWrite(studentOps, { session });
+
+        await session.commitTransaction();
+        session.endSession();
 
         res.status(200).json({
             message: 'Bulk upload completed successfully',
@@ -753,6 +800,10 @@ exports.bulkUploadStudents = async (req, res) => {
             modifiedCount: result.modifiedCount
         });
     } catch (error) {
+        if (session.inTransaction()) {
+            await session.abortTransaction();
+        }
+        session.endSession();
         console.error('Error in bulk upload:', error);
         res.status(500).json({ message: 'Server error processing bulk upload' });
     }
@@ -761,17 +812,34 @@ exports.bulkUploadStudents = async (req, res) => {
 // @route   POST /api/admin/student
 // @desc    Add a single student
 exports.addStudent = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
     try {
         const { firstName, lastName, indexNumber, email, faculty, year, sex } = req.body;
 
-        if (!indexNumber || !sex) {
-            return res.status(400).json({ message: 'Index Number and Sex are required' });
+        if (!indexNumber || !sex || !email) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({ message: 'Index Number, Sex, and Email are required' });
         }
 
         // Check for duplicates
-        const existingStudent = await Student.findOne({ indexNumber });
+        const existingStudent = await Student.findOne({ indexNumber }).session(session);
         if (existingStudent) {
+            await session.abortTransaction();
+            session.endSession();
             return res.status(400).json({ message: `Student with index ${indexNumber} already exists` });
+        }
+
+        const User = require('../models/User');
+        let user = await User.findOne({ email }).session(session);
+        if (!user) {
+            user = new User({
+                email,
+                password: indexNumber,
+                role: 'Student'
+            });
+            await user.save({ session });
         }
 
         const studentPayload = {
@@ -781,25 +849,27 @@ exports.addStudent = async (req, res) => {
             indexNumber,
             email,
             year,
-            sex
+            sex,
+            userId: user._id
         };
 
         // Try mapping faculty if provided
         if (faculty) {
             const facStr = faculty.toLowerCase();
-            const dbFac = await Faculty.findOne({ $or: [{ name: new RegExp('^' + facStr + '$', 'i') }, { facultyCode: new RegExp('^' + facStr + '$', 'i') }] });
+            const dbFac = await Faculty.findOne({ $or: [{ name: new RegExp('^' + facStr + '$', 'i') }, { facultyCode: new RegExp('^' + facStr + '$', 'i') }] }).session(session);
             if (dbFac) {
                 studentPayload.faculty = dbFac._id;
             }
         }
 
         const student = new Student(studentPayload);
+        await student.save({ session });
 
-        await student.save();
+        await session.commitTransaction();
+        session.endSession();
         res.status(201).json(student);
-
     } catch (error) {
-        console.error('Error adding single student:', error);
+        console.error('Error adding student:', error);
         res.status(500).json({ message: 'Server error adding student' });
     }
 };
@@ -1095,7 +1165,20 @@ exports.getStudents = async (req, res) => {
 // @desc    Get real-time capacity and occupancy statistics
 exports.getHostelCapacityStats = async (req, res) => {
     try {
-        const stats = await Room.aggregate([
+        const pipeline = [];
+
+        // Role-Based Scoping Stage
+        if (req.user.role === 'Admin') {
+            const managedIds = req.user.managedHostelIds || [];
+            if (managedIds.length === 0) {
+                return res.status(200).json({
+                    hostels: [],
+                    global: { totalCapacity: 0, filledBeds: 0, availableBeds: 0, occupancyRate: 0 }
+                });
+            }
+            pipeline.push({ $match: { hostel: { $in: managedIds } } });
+        }
+        pipeline.push(
             {
                 $group: {
                     _id: "$hostel",
@@ -1140,7 +1223,9 @@ exports.getHostelCapacityStats = async (req, res) => {
                 }
             },
             { $sort: { name: 1 } }
-        ]);
+        );
+
+        const stats = await Room.aggregate(pipeline);
 
         const globalStats = stats.reduce((acc, curr) => ({
             totalCapacity: acc.totalCapacity + curr.totalCapacity,
@@ -1180,6 +1265,11 @@ exports.getMaintenanceReport = async (req, res) => {
 
         if (issueType && issueType !== 'all') {
             query.assetKey = new RegExp(issueType, 'i');
+        }
+
+        // Role-based scoping
+        if (req.user.role === 'Admin' && req.user.managedHostelIds && req.user.managedHostelIds.length > 0) {
+            query.hostel = { $in: req.user.managedHostelIds };
         }
 
         const [tickets, totalCount] = await Promise.all([
@@ -1308,5 +1398,138 @@ exports.runGenderFix = async (req, res) => {
     } catch (error) {
         console.error('Gender fix endpoint error:', error);
         res.status(500).json({ message: 'Internal server error during gender fix.' });
+    }
+};
+
+// @desc    Get all users with 'Admin' role
+exports.getAdmins = async (req, res) => {
+    try {
+        const admins = await User.find({ role: 'Admin' }).populate('managedHostelIds', 'officialName alias');
+        res.status(200).json(admins);
+    } catch (error) {
+        console.error('Error fetching admins:', error);
+        res.status(500).json({ message: 'Server error fetching admins' });
+    }
+};
+
+// @desc    Create a new Admin user
+exports.createAdmin = async (req, res) => {
+    try {
+        const { email, name, password, managedHostelIds } = req.body;
+
+        const userExists = await User.findOne({ email });
+        if (userExists) {
+            return res.status(400).json({ message: 'User already exists' });
+        }
+
+        const admin = await User.create({
+            email,
+            name,
+            password, // Hashed via pre-save hook
+            role: 'Admin',
+            managedHostelIds: managedHostelIds || [],
+            isFirstLogin: true
+        });
+
+        res.status(201).json({
+            _id: admin._id,
+            email: admin.email,
+            name: admin.name,
+            role: admin.role,
+            managedHostelIds: admin.managedHostelIds
+        });
+    } catch (error) {
+        console.error('Error creating admin:', error);
+        res.status(500).json({ message: 'Server error creating admin' });
+    }
+};
+
+// @route   PUT /api/admin/admins/:id/hostel
+// @desc    Assign or update managed hostels for an admin
+exports.updateAdminHostel = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { managedHostelIds } = req.body;
+
+        const admin = await User.findById(id);
+        if (!admin || admin.role !== 'Admin') {
+            return res.status(404).json({ message: 'Admin not found' });
+        }
+
+        admin.managedHostelIds = managedHostelIds || [];
+        await admin.save();
+
+        res.status(200).json({
+            message: 'Admin hostel assignments updated',
+            admin: {
+                _id: admin._id,
+                email: admin.email,
+                managedHostelIds: admin.managedHostelIds
+            }
+        });
+    } catch (error) {
+        console.error('Error updating admin hostel:', error);
+        res.status(500).json({ message: 'Server error updating admin hostel' });
+    }
+};
+
+// @route   PUT /api/admin/admins/:id
+// @desc    Update Admin user details (name/email)
+exports.updateAdmin = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, email } = req.body;
+
+        const admin = await User.findById(id);
+        if (!admin || admin.role !== 'Admin') {
+            return res.status(404).json({ message: 'Admin not found' });
+        }
+
+        // Check if email is being changed and if it's already taken
+        if (email && email !== admin.email) {
+            const userExists = await User.findOne({ email });
+            if (userExists) {
+                return res.status(400).json({ message: 'Email already in use' });
+            }
+            admin.email = email;
+        }
+
+        if (name) admin.name = name;
+        await admin.save();
+
+        res.status(200).json({
+            message: 'Admin updated successfully',
+            admin: {
+                _id: admin._id,
+                name: admin.name,
+                email: admin.email
+            }
+        });
+    } catch (error) {
+        console.error('Error updating admin:', error);
+        res.status(500).json({ message: 'Server error updating admin' });
+    }
+};
+
+// @route   DELETE /api/admin/admins/:id
+// @desc    Permanently delete an Admin user
+exports.deleteAdmin = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const admin = await User.findById(id);
+        if (!admin || admin.role !== 'Admin') {
+            return res.status(404).json({ message: 'Admin not found' });
+        }
+
+        // Clear reference in Hostels
+        await Hostel.updateMany({ primaryWarden: id }, { $unset: { primaryWarden: "" } });
+
+        await User.findByIdAndDelete(id);
+
+        res.status(200).json({ message: 'Admin deleted successfully' });
+    } catch (error) {
+        console.error('Error deleting admin:', error);
+        res.status(500).json({ message: 'Server error deleting admin' });
     }
 };

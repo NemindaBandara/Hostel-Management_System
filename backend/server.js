@@ -13,10 +13,12 @@ app.use(express.json());
 const adminRoutes = require('./routes/adminRoutes');
 const publicRoutes = require('./routes/publicRoutes');
 const studentRoutes = require('./routes/studentRoutes');
+const authRoutes = require('./routes/authRoutes');
 
 app.use('/api/admin', adminRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/students', studentRoutes);
+app.use('/api/auth', authRoutes);
 
 // Database Connection
 mongoose

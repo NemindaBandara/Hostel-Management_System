@@ -89,6 +89,7 @@ exports.reportDamage = async (req, res) => {
             locationId,
             locationType,
             assetKey,
+            hostel: location.hostel,
             reportedBy: student._id,
             status: 'Pending'
         });
