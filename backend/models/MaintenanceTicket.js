@@ -11,6 +11,11 @@ const maintenanceTicketSchema = new mongoose.Schema({
         required: true,
         enum: ['Room', 'CommonArea']
     },
+    hostel: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Hostel',
+        required: true
+    },
     assetKey: {
         type: String,
         required: true

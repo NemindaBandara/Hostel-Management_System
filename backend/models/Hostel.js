@@ -17,6 +17,10 @@ const hostelSchema = new mongoose.Schema({
         type: Number,
         required: true,
     },
+    primaryWarden: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Hostel', hostelSchema);

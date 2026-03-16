@@ -14,12 +14,18 @@ exports.bulkSmartAllocate = async (req, res) => {
         const unassignedStudents = await Student.find({ assignedRoom: null }).populate('faculty');
 
         // 2. Fetch all rooms that are configured for specific allocation
-        // We only want rooms that are NOT general and HAVE a faculty/year configured
-        const rooms = await Room.find({
+        const roomQuery = {
             isGeneral: false,
             'allocation.faculty': { $ne: null },
             'allocation.year': { $ne: null }
-        }).populate('allocation.faculty').populate('hostel');
+        };
+
+        // Role-based scoping: Admins only manage their assigned hostel
+        if (req.user.role === 'Admin' && req.user.managedHostelIds && req.user.managedHostelIds.length > 0) {
+            roomQuery.hostel = { $in: req.user.managedHostelIds };
+        }
+
+        const rooms = await Room.find(roomQuery).populate('allocation.faculty').populate('hostel');
 
         // 3. Get current occupancy for these rooms
         const occupancyMap = await Student.aggregate([
