@@ -1,12 +1,21 @@
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { getAuthToken } from './auth';
 
 const api = axios.create({
-    baseURL: 'http://localhost:5000/api',
-    timeout: 10000,
-    headers: {
-        'Content-Type': 'application/json',
-    },
+    baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api',
+});
+
+api.interceptors.request.use((config) => {
+    const token = getAuthToken();
+    if (token && config.headers) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    // Ensure Content-Type is set if not already present, or if it was removed from the initial config
+    if (!config.headers['Content-Type']) {
+        config.headers['Content-Type'] = 'application/json';
+    }
+    return config;
 });
 
 api.interceptors.response.use(
